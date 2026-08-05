@@ -1,0 +1,86 @@
+name: CI/CD Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      # -------------------------------------------------------------
+      # 1. BUILD FRONTEND
+      # -------------------------------------------------------------
+      - name: Setup Node.js for Frontend
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: 'npm'
+          cache-dependency-path: 'chat-app/chat-frontend/package-lock.json'
+
+      - name: Install & Build Frontend
+        env:
+          VITE_WS_URL: wss://${{ secrets.EC2_HOST }}/ws
+        run: |
+          cd chat-app/chat-frontend
+          npm ci
+          npm run build
+
+      # -------------------------------------------------------------
+      # 2. BUILD BACKEND
+      # -------------------------------------------------------------
+      - name: Setup Node.js for Backend
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: 'npm'
+          cache-dependency-path: 'chat-app/chat-backend/package-lock.json'
+
+      - name: Install & Build Backend
+        run: |
+          cd chat-app/chat-backend
+          npm ci
+          npm run build
+
+      # -------------------------------------------------------------
+      # 3. DEPLOY FRONTEND TO EC2 (Nginx Web Root)
+      # -------------------------------------------------------------
+      - name: Deploy Frontend to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "chat-app/chat-frontend/dist/*"
+          target: "/var/www/chat-app"
+          strip_components: 3
+
+      # -------------------------------------------------------------
+      # 4. DEPLOY BACKEND TO EC2 & RESTART PM2
+      # -------------------------------------------------------------
+      - name: Deploy Backend to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "chat-app/chat-backend/dist/*,chat-app/chat-backend/package*.json"
+          target: "/home/ubuntu/chat-backend"
+          strip_components: 2
+
+      - name: Restart Backend Service via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/chat-backend
+            npm ci --production
+            pm2 restart chat-backend || pm2 start dist/server.js --name "chat-backend"
+            pm2 save
